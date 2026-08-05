@@ -1,114 +1,122 @@
+---
+name: project-claude-md
+description: Root guidance file for future Claude Code instances working in the movie-recommendation-system repo.
+metadata:
+  type: project
+---
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project: Script-Based Movie Recommendation System
+## What this project is
 
-A RAG-based movie recommendation engine. When a user finishes watching a movie, the service retrieves thematically/narratively similar films by comparing the **actual scripts** (not metadata like genre/director/cast). Scripts are scene-chunked, embedded with Cohere, stored in ChromaDB; LangGraph orchestrates retrieval, LLM rerank, and explanation generation.
-
-## Setup
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate            # Windows (use source .venv/bin/activate on *nix)
-pip install -r requirements.txt
-cp .env .env              # then edit: COHERE_API_KEY (required), OPENAI_API_KEY or ANTHROPIC_API_KEY
-```
-
-Requires Python 3.11+. `pyproject.toml` pins this via `requires-python`.
+A RAG-based movie recommendation engine that recommends films by comparing their **actual scripts** (not metadata). When a user finishes watching a movie, the service retrieves the most thematically and narratively similar movies and uses an LLM to explain *why*. Scripts are chunked by scene, embedded with Cohere, stored in ChromaDB, retrieved via cosine similarity, then reranked and explained by a LangGraph-orchestrated LLM workflow.
 
 ## Common commands
 
+All commands assume the project root and the venv activated (`.venv\Scripts\activate` on Windows, `source .venv/bin/activate` elsewhere).
+
 ```bash
-# Seed the ChromaDB bank from data/seed_manifest.json
+# Install deps
+pip install -r requirements.txt
+
+# Seed the vector bank from data/seed_manifest.json
 python -m scripts.run_seed
 
-# Ingest a single script (not in the seed manifest)
-python -m scripts.run_ingest --title "Dune" --year 2021 --format plaintext \
-    --source-path data/raw_scripts/dune.txt --director "Denis Villeneuve" --genres sci-fi drama
+# Ingest a single script (no server)
+python -m scripts.run_ingest \
+    --title "Dune" --year 2021 --format plaintext \
+    --source-path data/raw_scripts/dune.txt \
+    --director "Denis Villeneuve" --genres sci-fi drama
 
-# Run the API (two equivalent ways)
-python main.py
-uvicorn app.main:app --reload --port 8000
-
-# Tests
-pytest -v                       # full suite
-pytest tests/test_chunking.py   # one file
-pytest -k upsert                # one test by name substring
+# Run the API
+python main.py                                # production-style
+uvicorn app.main:app --reload --port 8000     # dev with autoreload
 
 # Lint
 ruff check .
-ruff format .
+
+# Tests (all)
+pytest -v
+
+# Tests (single file / single test)
+pytest -v tests/test_graph.py
+pytest -v tests/test_chunking.py::test_specific_name
 ```
 
-After starting the API, Swagger UI is at <http://localhost:8000/docs>.
-
-## Configuration
-
-All knobs live in `app/config.py` (Pydantic `Settings`, loaded from `.env` via `pydantic-settings`). Key tunables:
-
-| Setting | Default | Effect |
-|---|---|---|
-| `TOP_K_RETRIEVAL` | 50 | Chunks pulled from Chroma |
-| `TOP_K_RERANK` | 20 | Candidates the LLM rerank scores |
-| `TOP_K_FINAL` | 5 | Final recommendations in API response |
-| `CHUNK_TARGET_TOKENS` | 1200 | Target chunk size (sub-chunks at dialogue boundaries) |
-| `CHUNK_OVERLAP_TOKENS` | 150 | Sliding-window overlap for oversized dialogue blocks |
-| `LLM_PROVIDER` | `openai` | `openai` or `anthropic` |
-| `LLM_MODEL` | `gpt-4o-mini` | Chat model used by LangGraph nodes |
-
-`settings` is exposed as a module-level singleton (`from app.config import settings`) backed by an `lru_cache`. In tests, clear it with `get_settings.cache_clear()` after `monkeypatch.setenv(...)` to pick up new env vars (see `tests/conftest.py::tmp_chroma_dir`).
+Test config (from `pyproject.toml`): `testpaths = ["tests"]`, `asyncio_mode = "auto"`.
 
 ## High-level architecture
 
-Two pipelines share one ChromaDB collection:
+The system has two pipelines that share the same vector store.
 
-**Ingestion (offline, populates the bank):**
-`script file (PDF/Fountain/text)` → `app.ingestion.parser.parse_script` → `app.core.chunking.split_script` (scene-aware, then sub-chunked at dialogue blanks with sliding-window fallback for oversized blocks) → `app.core.embeddings.embed_documents` (Cohere `search_document` input type, batched at 96, retried via tenacity) → `app.core.vectorstore.upsert_chunks` (ChromaDB, cosine HNSW, ids are stable so re-runs are idempotent) → `app.core.movie_bank.MovieBank.add` (JSON-backed registry at `data/seed_manifest.json`).
+**Online path** — recommendation request:
+```
+HTTP POST /api/v1/recommend
+  → app/api/routes/recommend.py
+  → app/recommendation/service.py (builds GraphState, calls ainvoke)
+  → app/recommendation/graph.py (StateGraph)
+      fetch_watched → theme_extract (LLM) → retrieve_candidates (Chroma cosine)
+                    → rerank (LLM) → [explain (LLM)] → format_output → END
+  → RecommendationResponse (Pydantic)
+```
 
-**Recommendation (online, per request):**
-`POST /api/v1/recommend` → `app.api.routes.recommend` → `app.recommendation.service.recommend` → compiled LangGraph `app.recommendation.graph` running nodes in this fixed order:
+**Offline path** — ingestion:
+```
+script file (PDF / Fountain / plaintext)
+  → app/ingestion/parser.py
+  → app/core/chunking.py      (scene-aware, sub-chunked at dialogue boundaries)
+  → app/core/embeddings.py    (Cohere embed-english-v3.0, search_document input type)
+  → app/core/vectorstore.py   (Chroma upsert; collection metadata hnsw:space=cosine)
+  → app/core/movie_bank.py    (JSON-backed Movie registry; persist-on-add)
+```
 
-1. `fetch_watched` — reads up to 20 stored chunks for the watched movie_id directly from Chroma (see `app/recommendation/nodes/fetch_watched.py`).
-2. `theme_extract` (LLM) — extracts themes / narrative_patterns / tone / motifs + a `query_text` paragraph; falls back to first 500 chars of summary on JSON parse failure.
-3. `retrieve_candidates` — embeds `query_text` (Cohere `search_query`) → `app.core.retrieval.retrieve_similar` → `vectorstore.aggregate_by_movie` (groups by `movie_id`, weighted `sum_k min(distance, 1.0) * 1/(rank+1)`, excludes the watched movie).
-4. `rerank` (LLM) — for top-N candidates, scores 0.0–1.0 with a one-line reason; combined score = `0.6 * llm_score + 0.4 * base_score`. Falls back to base similarity if LLM call fails.
-5. `explain` (LLM) — 2–3 sentence explanations for the top `TOP_K_FINAL`. Falls back to a generic template if LLM fails.
-6. `format_output` — trims to `TOP_K_FINAL`, enriches `year` from `MovieBank`, packages `Recommendation` objects.
+The `MovieBank` registry (`data/seed_manifest.json`) is loaded by `MovieBank._ensure_loaded()` lazily on first access; ingestion mutates it via `bank.add(movie)` and persists.
 
-The `rerank` node has a **conditional edge** (`app/recommendation/graph.py::_route_after_rerank`): if rerank produced zero candidates, it skips `explain` and goes straight to `format_output`. Each LLM node is wrapped in `try/except` and writes an `error` + `trace` entry on failure so the API never 500s due to a transient LLM error — degraded answers are returned instead.
+## Key files and what they own
 
-## Key conventions
+- `app/config.py` — `Settings` (pydantic-settings) + cached `settings` singleton; every tunable (chunk sizes, top_k values, LLM provider/model, paths) lives here.
+- `app/main.py` — FastAPI factory; mounts CORS and the four routers (`health`, `movies`, `recommend`, `ingest`).
+- `app/core/chunking.py` — `split_script(...)` returns `(scenes, chunks)`. Uses tiktoken `cl100k_base` for token counts. Recognises Fountain-style sluglines first, falls back to `SCENE N` / `ACT N` headers; whole document becomes one scene if no headers found.
+- `app/core/embeddings.py` — Cohere wrapper with batching (`_MAX_BATCH = 96`), tenacity retries (4 attempts, exponential backoff 1→20s), and asymmetric `input_type` (documents → `search_document`, queries → `search_query`).
+- `app/core/vectorstore.py` — Chroma persistent client. `upsert_chunks(...)` is idempotent (stable chunk ids). `aggregate_by_movie(...)` converts cosine distance to similarity (clamped to [0,1]) and aggregates per-movie via rank-weighted sum `sum similarity_k * 1/(rank+1)`. Uses `{"$ne": ...}` to exclude the watched movie from its own candidates.
+- `app/core/movie_bank.py` — JSON-backed registry with `_ensure_loaded` lazy init; the bank file doubles as the seed manifest. `reset_movie_bank()` and `vectorstore.reset_caches()` exist for tests.
+- `app/core/llm.py` — `get_chat_model()` returns a LangChain `BaseChatModel` (`ChatOpenAI` or `ChatAnthropic`) based on `settings.llm_provider`; temperature fixed at 0.2.
+- `app/recommendation/state.py` — `GraphState` TypedDict (`total=False`) shared by all nodes. `trace` uses an `Annotated[list[dict], add]` reducer so node diagnostics accumulate rather than overwrite.
+- `app/recommendation/graph.py` — Compiled StateGraph; conditional edge after `rerank` routes directly to `format_output` if the rerank list is empty (skips the LLM explain step).
+- `app/recommendation/nodes/*` — Each node returns a dict of state deltas. LLM nodes have soft-fallback paths: `theme_extract` falls back to the summary's first 500 chars; the README notes `rerank`/`explain` fall back to base similarity / generic template on failure so the API keeps responding.
+- `app/ingestion/pipeline.py` — `ingest_movie(movie, script_path)` is the single ingestion entrypoint used by both `scripts.run_seed` and `scripts.run_ingest`.
 
-- **`GraphState` is `TypedDict(total=False)`** (`app/recommendation/state.py`); nodes return dicts and LangGraph merges them. List/None defaults (`[]`, `{}`) are set explicitly in `service.recommend` because LangGraph won't fill `total=False` keys.
-- **Caching is per-process.** `app/core/vectorstore.py` and `app/core/embeddings.py` use module-level `@lru_cache`. Tests reset via `vectorstore.reset_caches()` and `graph.reset_graph_cache()`. The compiled LangGraph is also lazily cached (`app/recommendation/graph.py::_graph`).
-- **Chroma metadata sanitization** (`_sanitize_meta` in `vectorstore.py`): only `str | int | float | bool` are stored; lists are joined with commas. Don't put a `list[str]` directly into `Chunk.metadata`.
-- **Movie IDs are slug + year** when auto-generated (`pipeline.py::make_movie_id`). Use the explicit `id` from the seed manifest when available.
-- **Cohere input types are asymmetric.** Use `search_document` for chunks being indexed and `search_query` for retrieval queries (`app/core/embeddings.py`).
-- **CORS is wide-open (`*`)** in `app/main.py` for local dev. Tighten before any deployment.
-- **`MovieBank` is JSON-backed** (`app/core/movie_bank.py`), loaded lazily and persisted on every `add(persist=True)`. It is suitable for hundreds of movies; for larger banks replace with SQLite/Postgres.
-- **`__init__.py` files are present in every package** but most are empty. `app/__init__.py` exposes `__version__ = "0.1.0"`.
+## Important behavioral details
 
-## API surface
+- Movie IDs are slugified from `<title>_<year>` when not explicitly provided (`pipeline.make_movie_id`). Tests and the seed manifest pin them explicitly.
+- The watched movie is **excluded** from its own candidate set via `where={"movie_id": {"$ne": exclude_movie_id}}` in `aggregate_by_movie`.
+- Cosine aggregation is rank-weighted: `score = Σ similarity_k / (rank_k + 1)` over the top N results, then sorted descending.
+- `fetch_watched_node` raises `WatchedMovieNotIndexedError` when the watched movie is in the bank but has no chunks in Chroma — the API route converts this to HTTP 404 (not 500).
+- `recommendation/service.py::recommend()` is async; `recommend_sync()` wraps it with `asyncio.run` for tests/scripts.
+- CORS is open (`allow_origins=["*"]`) — fine for local dev, do not ship as-is.
+- Chroma persists locally under `./data/chroma/` (gitignored). Re-running `scripts.run_seed` is idempotent because chunk ids are stable.
 
-- `GET /health` — service status, version, Chroma collection size.
-- `GET /api/v1/movies`, `GET /api/v1/movies/{id}` — list/fetch from `MovieBank`.
-- `POST /api/v1/recommend` — body `{watched_movie_id, top_k, include_explanations}`; returns watched summary, themes, ranked recommendations with optional explanations, and a `trace_id`.
-- `POST /api/v1/ingest` — body `{title, year, format, source_path, ...}`; runs the ingestion pipeline synchronously.
+## Test layout
 
-Schemas live in `app/api/schemas.py`; Pydantic v2.
+- `tests/conftest.py` — `tmp_chroma_dir` fixture swaps `CHROMA_PERSIST_DIR` / `SEED_MANIFEST_PATH` to a temp dir and clears the cached settings + chroma clients.
+- `tests/test_api.py`, `test_chunking.py`, `test_embeddings.py`, `test_graph.py`, `test_retrieval.py`, `test_vectorstore.py` — unit tests covering each subsystem.
+- For graph tests: `app.recommendation.graph.reset_graph_cache()` exists so a fresh compiled graph picks up monkeypatched settings.
 
-## Testing notes
+## Configuration knobs (see `app/config.py`)
 
-- `tests/conftest.py::tmp_chroma_dir` points `CHROMA_PERSIST_DIR` and `SEED_MANIFEST_PATH` at a temp dir, clears the settings + chroma caches, and cleans up after. **Every test that touches Chroma must request this fixture.**
-- The graph tests (`tests/test_graph.py`) stub both the LLM (`app.core.llm.get_chat_model`) and the Cohere embedder (`app.core.retrieval.embeddings.embed_query`) — they don't require real API keys. Use deterministic 4-dim vectors; Chroma does not enforce a specific dim.
-- `pyproject.toml` sets `asyncio_mode = "auto"` for pytest-asyncio; `@pytest.mark.asyncio` is the convention but not strictly required.
-- API tests use `httpx.ASGITransport` against the in-process `create_app()` factory.
+| Setting | Default | Purpose |
+|---|---|---|
+| `TOP_K_RETRIEVAL` | 50 | Chunks fetched from Chroma |
+| `TOP_K_RERANK` | 20 | Candidates the LLM reranks |
+| `TOP_K_FINAL` | 5 | Final recommendations in the response |
+| `CHUNK_TARGET_TOKENS` | 1200 | Sub-chunk target |
+| `CHUNK_OVERLAP_TOKENS` | 150 | Sliding-window overlap for oversized dialogue |
+| `MAX_SCENE_TOKENS` | 1500 | If a scene ≤ this, it stays as one chunk |
+| `LLM_PROVIDER` | openai | `openai` or `anthropic` |
+| `LLM_MODEL` | `gpt-4o-mini` | Chat model used by LangGraph |
 
-## Seed data and licensing
+## Security note
 
-`data/raw_scripts/` ships 5 placeholder scripts (Casablanca 1942, It's a Wonderful Life 1946, The Matrix 1999, Inception 2010, Interstellar 2014). Per `data/LICENSE_NOTES.md`, the first two are public-domain; the others are excerpts only. Replace with rights-cleared scripts before any production deployment.
-
-## Out of scope for /init
-
-There is no existing CLAUDE.md, `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md` in this repo. The `.idea/` directory is a JetBrains IDE project metadata folder — ignore.
+`.env` is currently tracked in the working tree (per `git status`) and contains a real Cohere API key. `.gitignore` already excludes `.env`, but the file was committed earlier — **rotate the Cohere key** and remove `.env` from git history before any push or PR. Do not commit future secrets; copy from `.env.example` (referenced by the README) instead.

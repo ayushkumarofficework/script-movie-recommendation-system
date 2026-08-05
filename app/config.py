@@ -21,7 +21,6 @@ class Settings(BaseSettings):
 
     # --- Cohere embeddings (required) ---
     cohere_api_key: str = Field(default="")
-    # cohere_api_key: str = "iQiCil22vbtMLGqz485TcVce1JT8SYxzkIZZ2LPO"
     cohere_model: str = "embed-english-v3.0"
     embed_dim: int = 1024
 
