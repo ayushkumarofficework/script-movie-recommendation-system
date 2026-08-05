@@ -1,0 +1,5 @@
+curl -X POST http://localhost:8000/api/v1/recommend -H "Content-Type: application/json" -d '{
+        "watched_movie_id": "the_matrix_1999",
+        "top_k": 3,
+        "include_explanations": true
+      }'

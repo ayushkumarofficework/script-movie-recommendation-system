@@ -1,0 +1,66 @@
+{
+  "movies": [
+    {
+      "id": "casablanca_1942",
+      "title": "Casablanca",
+      "year": 1942,
+      "director": "Michael Curtiz",
+      "genres": [
+        "Drama",
+        "Romance",
+        "War"
+      ],
+      "runtime_min": 102,
+      "source_uri": "https://imsdb.com/scripts/Casablanca.html"
+    },
+    {
+      "id": "its_a_wonderful_life_1946",
+      "title": "It's a Wonderful Life",
+      "year": 1946,
+      "director": "Frank Capra",
+      "genres": [
+        "Drama",
+        "Family",
+        "Fantasy"
+      ],
+      "runtime_min": 130,
+      "source_uri": "https://imsdb.com/scripts/It's-a-Wonderful-Life.html"
+    },
+    {
+      "id": "the_matrix_1999",
+      "title": "The Matrix",
+      "year": 1999,
+      "director": "The Wachowskis",
+      "genres": [
+        "Sci-Fi",
+        "Action"
+      ],
+      "runtime_min": 136,
+      "source_uri": "https://www.dailyscript.com/scripts/the_matrix.pdf"
+    },
+    {
+      "id": "inception_2010",
+      "title": "Inception",
+      "year": 2010,
+      "director": "Christopher Nolan",
+      "genres": [
+        "Sci-Fi",
+        "Thriller"
+      ],
+      "runtime_min": 148,
+      "source_uri": "https://www.scriptslug.com/scripts/inception"
+    },
+    {
+      "id": "interstellar_2014",
+      "title": "Interstellar",
+      "year": 2014,
+      "director": "Christopher Nolan",
+      "genres": [
+        "Sci-Fi",
+        "Drama"
+      ],
+      "runtime_min": 169,
+      "source_uri": "https://www.dailyscript.com/scripts/interstellar.html"
+    }
+  ]
+}
